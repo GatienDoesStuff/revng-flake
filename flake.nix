@@ -11,167 +11,177 @@
 
   outputs = { self, nixpkgs, poetry2nix }:
     let
-      system = "x86_64-linux";
-
-      # Enable Python 2.7. The version of QEMU we're using still needs it.
-      pkgs = import nixpkgs {
-        inherit system;
-        config.permittedInsecurePackages = [ "python-2.7.18.8" ];
-      };
-
-      # Adopt:
-      # * clang as a compiler
-      # * libc++ as C++ standard library
-      # * mold as linker
-      stdenv = (pkgs.useMoldLinker pkgs.llvmPackages_16.libcxxStdenv);
-
-      # Use a fake npm project to specify JavaScript dependencies
-      revngJavascriptDependencies = pkgs.buildNpmPackage rec {
-        name = "revng";
-        npmFlags = [ "--legacy-peer-deps" ];
-        makeCacheWritable = true;
-        src = ./revng-js-dependencies;
-        dontNpmBuild = true;
-        npmDepsHash = "sha256-8w/ss3DJlo3Mw+Zi6jJxo/3p8I6MDNXSahwdHKNB+Ts=";
-      };
-
-      # Import from poetry2nix
-      inherit (poetry2nix.lib.mkPoetry2Nix { inherit pkgs; }) mkPoetryApplication overrides;
-
-      revngPythonDependencies = mkPoetryApplication {
-        projectDir = ./revng-python-dependencies;
-        overrides = let
-          addBuildInputs = package: list: package.overridePythonAttrs (
-            old: {
-              buildInputs = (old.buildInputs or [ ]) ++ list;
-            }
-          );
-        in
-          overrides.withDefaults
-            (self: super: {
-              # Various fixes for packages having issues with poetry
-              mkdocs-graphviz = addBuildInputs super.mkdocs-graphviz [ super.setuptools ];
-              grandiso = addBuildInputs super.grandiso [ super.setuptools ];
-              python-idb = addBuildInputs super.python-idb [ super.setuptools ];
-              vivisect-vstruct-wb = addBuildInputs super.vivisect-vstruct-wb [ super.setuptools ];
-              marko = addBuildInputs super.marko [ super.pdm-backend ];
-              mkdocs-get-deps = addBuildInputs super.mkdocs-get-deps [ super.hatchling ];
-              flake8-builtins = addBuildInputs super.flake8-builtins [ super.hatchling ];
-              flake8-eradicate = addBuildInputs super.flake8-eradicate [ super.poetry-core ];
-
-              flake8-return = super.flake8-return.overridePythonAttrs (
-                old: {
-                  buildInputs = (old.buildInputs or [ ]) ++ [ super.poetry-core ];
-                  postPatch = ''
-                  substituteInPlace pyproject.toml --replace "poetry.masonry" "poetry.core.masonry"
-                  '';
-                }
-              );
-
-              flake8-breakpoint = super.flake8-breakpoint.overridePythonAttrs (
-                old: {
-                  buildInputs = (old.buildInputs or [ ]) ++ [ super.poetry-core ];
-                  postPatch = ''
-                  substituteInPlace pyproject.toml --replace "poetry.masonry" "poetry.core.masonry"
-                  '';
-                }
-              );
-
-              hexdump = super.hexdump.overridePythonAttrs (
-                old: {
-                  postPatch = ''
-                  cd ..
-                  '';
-                }
-              );
-
-              # Add libyaml for C implementation of YAML for greater performance
-              pyyaml = addBuildInputs super.pyyaml [ pkgs.libyaml ];
-
-              # Do not bother with -Werror for mypy
-              mypy = super.mypy.overridePythonAttrs (
-                old: {
-                  postPatch = ''
-                  substituteInPlace mypyc/build.py --replace '"-Werror",' ""
-                  '';
-                }
-              );
-
-              cmakelang = super.cmakelang.overridePythonAttrs (
-                old: {
-                  buildInputs = (old.buildInputs or [ ]) ++ [ super.setuptools ];
-                  patches = [ (pkgs.writeText "inline-patch.patch" ''
-                    --- pypi/setup.py
-                    +++ pypi/setup.py
-                    @@ -62,6 +62,7 @@ setup(
-                         install_requires=["six>=1.13.0"]
-                     )
-
-                    +"""
-                     setup(
-                         name="cmake-annotate",
-                         packages=[],
-                    @@ -155,3 +156,4 @@ setup(
-                         include_package_data=True,
-                         install_requires=["cmakelang>={}".format(VERSION)]
-                     )
-                    +"""
-                    '')];
-                  postPatch = ''
-                  echo make
-                  substituteInPlace setup.py --replace "cmakelang/doc/README.rst" "README.rst"
-                  '';
-                }
-              );
-            });
-      };
-
-      #
-      # Build C++ dependencies using our stdenv
-      #
-      boost-test = (
-        pkgs.lib.fix (self:
-          pkgs.callPackage "${nixpkgs}/pkgs/development/libraries/boost/1.81.nix" {
-            stdenv = pkgs.llvmPackages_16.libcxxStdenv;
-
-            # Use the right version of boost-build.
-            # This has been copied from nixpkgs.
-            boost-build = pkgs.boost-build.override { useBoost = self; };
-          }
-        )
-      ).overrideAttrs (oldAttrs: {
-        # Build only the libraries we're interseted in
-        configureFlags = oldAttrs.configureFlags ++ [ "--with-libraries=test" ];
-      });
-
-      aws-crt-cpp = (pkgs.callPackage "${nixpkgs}/pkgs/development/libraries/aws-crt-cpp/default.nix" {
-        stdenv = stdenv;
-      });
-
-      aws-sdk-cpp = (pkgs.callPackage "${nixpkgs}/pkgs/development/libraries/aws-sdk-cpp/default.nix" {
-        stdenv = stdenv;
-
-        aws-crt-cpp = aws-crt-cpp;
-
-        # These are macOS-specific but required
-        AudioToolbox = null;
-        CoreAudio = null;
-
-        # Only build the APIs we're interested in
-        apis = ["s3"];
-      }).overrideAttrs (oldAttrs: {
-        cmakeFlags = oldAttrs.cmakeFlags ++ [
-          "-DENABLE_TESTING=OFF"
-          "-DFORCE_CURL=ON"
-          "-DENABLE_UNITY_BUILD=OFF"
-          "-DENABLE_RTTI=OFF"
-          "-DCPP_STANDARD=20"
-        ];
-      });
-
+      supportedSystems = [ "x86_64-linux" "aarch64-linux" ];
+      forAllSystems = nixpkgs.lib.genAttrs supportedSystems;
     in
-      {
-        packages.${system} = {
+    {
+      packages = forAllSystems (system:
+        let
+
+          # Enable Python 2.7. The version of QEMU we're using still needs it.
+          pkgs = import nixpkgs {
+            inherit system;
+            config.permittedInsecurePackages = [ "python-2.7.18.8" ];
+          };
+
+          # Adopt:
+          # * clang as a compiler
+          # * libc++ as C++ standard library
+          # * mold as linker
+          stdenv = (pkgs.useMoldLinker pkgs.llvmPackages_16.libcxxStdenv);
+
+          # Use a fake npm project to specify JavaScript dependencies
+          revngJavascriptDependencies = pkgs.buildNpmPackage rec {
+            name = "revng";
+            npmFlags = [ "--legacy-peer-deps" ];
+            makeCacheWritable = true;
+            src = ./revng-js-dependencies;
+            dontNpmBuild = true;
+            npmDepsHash = "sha256-8w/ss3DJlo3Mw+Zi6jJxo/3p8I6MDNXSahwdHKNB+Ts=";
+          };
+
+          # Import from poetry2nix
+          inherit (poetry2nix.lib.mkPoetry2Nix { inherit pkgs; }) mkPoetryApplication overrides;
+
+          revngPythonDependencies = mkPoetryApplication {
+            projectDir = ./revng-python-dependencies;
+            overrides =
+              let
+                addBuildInputs = package: list: package.overridePythonAttrs (
+                  old: {
+                    buildInputs = (old.buildInputs or [ ]) ++ list;
+                  }
+                );
+              in
+              overrides.withDefaults
+                (self: super: {
+                  # Various fixes for packages having issues with poetry
+                  mkdocs-graphviz = addBuildInputs super.mkdocs-graphviz [ super.setuptools ];
+                  grandiso = addBuildInputs super.grandiso [ super.setuptools ];
+                  python-idb = addBuildInputs super.python-idb [ super.setuptools ];
+                  vivisect-vstruct-wb = addBuildInputs super.vivisect-vstruct-wb [ super.setuptools ];
+                  marko = addBuildInputs super.marko [ super.pdm-backend ];
+                  mkdocs-get-deps = addBuildInputs super.mkdocs-get-deps [ super.hatchling ];
+                  flake8-builtins = addBuildInputs super.flake8-builtins [ super.hatchling ];
+                  flake8-eradicate = addBuildInputs super.flake8-eradicate [ super.poetry-core ];
+
+                  flake8-return = super.flake8-return.overridePythonAttrs (
+                    old: {
+                      buildInputs = (old.buildInputs or [ ]) ++ [ super.poetry-core ];
+                      postPatch = ''
+                        substituteInPlace pyproject.toml --replace "poetry.masonry" "poetry.core.masonry"
+                      '';
+                    }
+                  );
+
+                  flake8-breakpoint = super.flake8-breakpoint.overridePythonAttrs (
+                    old: {
+                      buildInputs = (old.buildInputs or [ ]) ++ [ super.poetry-core ];
+                      postPatch = ''
+                        substituteInPlace pyproject.toml --replace "poetry.masonry" "poetry.core.masonry"
+                      '';
+                    }
+                  );
+
+                  hexdump = super.hexdump.overridePythonAttrs (
+                    old: {
+                      postPatch = ''
+                        cd ..
+                      '';
+                    }
+                  );
+
+                  # Add libyaml for C implementation of YAML for greater performance
+                  pyyaml = addBuildInputs super.pyyaml [ pkgs.libyaml ];
+
+                  # Do not bother with -Werror for mypy
+                  mypy = super.mypy.overridePythonAttrs (
+                    old: {
+                      postPatch = ''
+                        substituteInPlace mypyc/build.py --replace '"-Werror",' ""
+                      '';
+                    }
+                  );
+
+                  cmakelang = super.cmakelang.overridePythonAttrs (
+                    old: {
+                      buildInputs = (old.buildInputs or [ ]) ++ [ super.setuptools ];
+                      patches = [
+                        (pkgs.writeText "inline-patch.patch" ''
+                          --- pypi/setup.py
+                          +++ pypi/setup.py
+                          @@ -62,6 +62,7 @@ setup(
+                               install_requires=["six>=1.13.0"]
+                           )
+
+                          +"""
+                           setup(
+                               name="cmake-annotate",
+                               packages=[],
+                          @@ -155,3 +156,4 @@ setup(
+                               include_package_data=True,
+                               install_requires=["cmakelang>={}".format(VERSION)]
+                           )
+                          +"""
+                        '')
+                      ];
+                      postPatch = ''
+                        echo make
+                        substituteInPlace setup.py --replace "cmakelang/doc/README.rst" "README.rst"
+                      '';
+                    }
+                  );
+                });
+          };
+
+          #
+          # Build C++ dependencies using our stdenv
+          #
+          boost-test = (
+            pkgs.lib.fix (self:
+              pkgs.callPackage "${nixpkgs}/pkgs/development/libraries/boost/1.81.nix" {
+                stdenv = pkgs.llvmPackages_16.libcxxStdenv;
+
+                # Use the right version of boost-build.
+                # This has been copied from nixpkgs.
+                boost-build = pkgs.boost-build.override { useBoost = self; };
+              }
+            )
+          ).overrideAttrs (oldAttrs: {
+            # Build only the libraries we're interseted in
+            configureFlags = oldAttrs.configureFlags ++ [ "--with-libraries=test" ];
+          });
+
+          aws-crt-cpp = (pkgs.callPackage "${nixpkgs}/pkgs/development/libraries/aws-crt-cpp/default.nix" {
+            stdenv = stdenv;
+          });
+
+          aws-sdk-cpp = (pkgs.callPackage "${nixpkgs}/pkgs/development/libraries/aws-sdk-cpp/default.nix" {
+            stdenv = stdenv;
+
+            aws-crt-cpp = aws-crt-cpp;
+
+            # These are macOS-specific but required
+            AudioToolbox = null;
+            CoreAudio = null;
+
+            # Only build the APIs we're interested in
+            apis = [ "s3" ];
+          }).overrideAttrs (oldAttrs: {
+            cmakeFlags = oldAttrs.cmakeFlags ++ [
+              "-DENABLE_TESTING=OFF"
+              "-DFORCE_CURL=ON"
+              "-DENABLE_UNITY_BUILD=OFF"
+              "-DENABLE_RTTI=OFF"
+              "-DCPP_STANDARD=20"
+            ];
+          });
+
+        in
+        {
+
+
+
           # Build our LLVM fork
           llvm = stdenv.mkDerivation {
             name = "llvm";
@@ -267,7 +277,7 @@
             nativeBuildInputs = with pkgs; [
               cmake
               ninja
-              (python312.withPackages(ps: with ps; [
+              (python312.withPackages (ps: with ps; [
                 jinja2
                 pyyaml
               ]))
@@ -278,7 +288,7 @@
             ];
 
           };
-          
+
           "test/revng-qa" = stdenv.mkDerivation {
             name = "test/revng-qa";
 
@@ -290,15 +300,15 @@
                 crossSystem = { config = "mips-unknown-linux-musl"; };
               }).stdenv.cc
               self.packages.${system}.revng-qa
-              (python312.withPackages(ps: with ps; [
+              (python312.withPackages (ps: with ps; [
                 jinja2
                 pyyaml
               ]))
             ];
 
             installPhase = ''
-                mkdir -p "$out/bin"
-                python3 ${self.packages.${system}.revng-qa}/libexec/revng/test-configure --help &> $out/hello.txt || true
+              mkdir -p "$out/bin"
+              python3 ${self.packages.${system}.revng-qa}/libexec/revng/test-configure --help &> $out/hello.txt || true
             '';
 
           };
@@ -350,6 +360,6 @@
 
           };
 
-        };
-      };
+        });
+    };
 }
