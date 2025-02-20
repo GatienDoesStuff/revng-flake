@@ -28,7 +28,7 @@
           # * clang as a compiler
           # * libc++ as C++ standard library
           # * mold as linker
-          stdenv = (pkgs.useMoldLinker pkgs.llvmPackages_16.libcxxStdenv);
+          stdenv = (pkgs.useMoldLinker pkgs.llvmPackages_16.stdenv);
 
           # Use a fake npm project to specify JavaScript dependencies
           revngJavascriptDependencies = pkgs.buildNpmPackage rec {
